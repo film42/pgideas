@@ -24,7 +24,6 @@ async fn main() -> io::Result<()> {
         println!("Client connected: {:?}", client_info);
         tokio::spawn({
             async move {
-                println!("Client disconnected: {:?}", client_info);
                 let mut buffer = [0; 8096];
 
                 // Startup / SSL Request
@@ -68,31 +67,42 @@ async fn main() -> io::Result<()> {
                 loop {
                     // Query
                     let n = client.read(&mut buffer[..]).await.unwrap();
-                    let tag = buffer[0];
-                    //let tag = BigEndian::read_i32(&buffer[0..4]);
-                    println!("Read: {:?}, Tag: {}", n, tag as char);
-                    if tag as char != 'Q' {
-                        return;
-                    }
-                    let size = BigEndian::read_i32(&buffer[1..5]) as usize;
-                    let query = std::str::from_utf8(&buffer[5..size]).unwrap();
-                    println!("Query: {}", query);
+                    let tag = buffer[0] as char;
+                    match tag {
+                        'Q' => {
+                            //let tag = BigEndian::read_i32(&buffer[0..4]);
+                            println!("Read: {:?}, Tag: {}", n, tag as char);
+                            let size = BigEndian::read_i32(&buffer[1..5]) as usize;
+                            let query = std::str::from_utf8(&buffer[5..size]).unwrap();
+                            println!("Query: {}", query);
 
-                    // Empty Query Response
-                    let mut msg = [0; 5];
-                    msg[0] = b'I';
-                    BigEndian::write_i32(&mut msg[1..5], 4);
-                    let n = client.write(&msg[..]).await.unwrap();
-                    println!("Wrote: {:?}", n);
+                            // Empty Query Response
+                            let mut msg = [0; 5];
+                            msg[0] = b'I';
+                            BigEndian::write_i32(&mut msg[1..5], 4);
+                            let n = client.write(&msg[..]).await.unwrap();
+                            println!("Wrote: {:?}", n);
 
-                    // Ready For Query
-                    let mut msg = [0; 6];
-                    msg[0] = b'Z';
-                    BigEndian::write_i32(&mut msg[1..5], 5);
-                    msg[5] = b'I';
-                    let n = client.write(&msg[..]).await.unwrap();
-                    println!("Wrote: {:?}", n);
+                            // Ready For Query
+                            let mut msg = [0; 6];
+                            msg[0] = b'Z';
+                            BigEndian::write_i32(&mut msg[1..5], 5);
+                            msg[5] = b'I';
+                            let n = client.write(&msg[..]).await.unwrap();
+                            println!("Wrote: {:?}", n);
+                        }
+                        'X' => {
+                            println!("Terminate received!");
+                            break;
+                        }
+                        _ => {
+                            println!("Found new tag: {}", tag);
+                            break;
+                        }
+                    };
                 }
+
+                println!("Client disconnected: {:?}", client_info);
             }
         });
     }
