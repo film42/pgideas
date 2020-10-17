@@ -1,0 +1,12 @@
+[package]
+name = "pgfiesta"
+version = "0.1.0"
+authors = ["Garrett Thornburg <film42@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures = "*"
+tokio = { version = "*", features = ["macros", "tcp", "rt-core", "stream", "io-util"] }
+byteorder = "*"
