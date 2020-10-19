@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::future::Either;
@@ -9,6 +10,31 @@ use tokio::net::{
     tcp::{ReadHalf, WriteHalf},
     TcpListener, TcpStream,
 };
+
+struct PgConnManager {}
+
+#[async_trait]
+impl bb8::ManageConnection for PgConnManager {
+    type Connection = TcpStream;
+    type Error = io::Error;
+
+    async fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        // We have a Query so we should connect to the server.
+        println!("SRV Opening a new connection for query!");
+        let mut pg_conn =
+            TcpStream::connect("127.0.0.1:5432".parse::<SocketAddr>().unwrap()).await?;
+        handle_server_startup(&mut pg_conn).await?;
+        Ok(pg_conn)
+    }
+
+    async fn is_valid(&self, conn: Self::Connection) -> Result<Self::Connection, Self::Error> {
+        Ok(conn)
+    }
+
+    fn has_broken(&self, conn: &mut Self::Connection) -> bool {
+        false
+    }
+}
 
 async fn handle_server_startup(conn: &mut TcpStream) -> io::Result<()> {
     let mut msg = [0; 1024];
@@ -121,11 +147,21 @@ async fn main() -> io::Result<()> {
     let bind_addr = "127.0.0.1:7432".parse::<SocketAddr>().unwrap();
     println!("Listening on: {:?}", bind_addr);
     let mut listener = TcpListener::bind(bind_addr).await?;
+
+    let manager = PgConnManager {};
+    let pg_conn_pool = bb8::Pool::builder()
+        .max_size(50)
+        .build(manager)
+        .await
+        .unwrap();
+
     loop {
         let (mut client, _) = listener.accept().await?;
         let client_info = format!("{:?}", client);
         println!("Client connected: {:?}", client_info);
         tokio::spawn({
+            let pg_conn_pool = pg_conn_pool.clone();
+
             async move {
                 // Allocate buffer for the client and server
                 let mut buffer = BytesMut::with_capacity(8096);
@@ -196,13 +232,8 @@ async fn main() -> io::Result<()> {
                         _ => panic!("Found new tag: {}", tag),
                     };
 
-                    // We have a Query so we should connect to the server.
-                    println!("SRV Opening a new connection for query!");
-                    let mut pg_conn =
-                        TcpStream::connect("127.0.0.1:5432".parse::<SocketAddr>().unwrap())
-                            .await
-                            .unwrap();
-                    handle_server_startup(&mut pg_conn).await.unwrap();
+                    // Check out a pg_conn
+                    let mut pg_conn = pg_conn_pool.get().await.unwrap();
 
                     // Write Query to PG
                     pg_conn.write(&buffer[..n]).await.unwrap();
@@ -284,7 +315,7 @@ async fn main() -> io::Result<()> {
                                         }
                                         'Z' => {
                                             if pg_buffer[idx + 5] == b'I' {
-                                                // Transaction completed. Close the pg conn.
+                                                // Transaction completed. Return pg conn to pool.
                                                 drop(pg_conn);
                                                 println!("SRV: Connection was closed!");
                                                 break 'transaction;

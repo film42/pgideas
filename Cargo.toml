@@ -12,3 +12,5 @@ tokio = { version = "*", features = ["macros", "tcp", "rt-core", "stream", "io-u
 bytes = "*"
 byteorder = "*"
 memchr = "*"
+bb8 = "*"
+async-trait = "*"
