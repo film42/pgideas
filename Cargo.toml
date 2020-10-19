@@ -9,4 +9,6 @@ edition = "2018"
 [dependencies]
 futures = "*"
 tokio = { version = "*", features = ["macros", "tcp", "rt-core", "stream", "io-util"] }
+bytes = "*"
 byteorder = "*"
+memchr = "*"

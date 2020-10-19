@@ -234,7 +234,9 @@ name = "pgfiesta"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "bytes",
  "futures",
+ "memchr",
  "tokio",
 ]
 
