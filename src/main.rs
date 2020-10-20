@@ -2,16 +2,28 @@ use async_trait::async_trait;
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::future::Either;
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
 use std::io;
 use std::io::Write;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{
     tcp::{ReadHalf, WriteHalf},
     TcpListener, TcpStream,
 };
+use tokio::sync::Mutex;
 
-struct PgConnManager {}
+struct PgConnManager {
+    startup_message: StartupMessage,
+}
+
+impl PgConnManager {
+    fn new(startup_message: StartupMessage) -> PgConnManager {
+        PgConnManager { startup_message }
+    }
+}
 
 #[async_trait]
 impl bb8::ManageConnection for PgConnManager {
@@ -23,7 +35,7 @@ impl bb8::ManageConnection for PgConnManager {
         println!("SRV Opening a new connection for query!");
         let mut pg_conn =
             TcpStream::connect("127.0.0.1:5432".parse::<SocketAddr>().unwrap()).await?;
-        handle_server_startup(&mut pg_conn).await?;
+        handle_server_startup(&mut pg_conn, &self.startup_message).await?;
         Ok(pg_conn)
     }
 
@@ -31,22 +43,79 @@ impl bb8::ManageConnection for PgConnManager {
         Ok(conn)
     }
 
-    fn has_broken(&self, conn: &mut Self::Connection) -> bool {
+    fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
         false
     }
 }
 
-async fn handle_server_startup(conn: &mut TcpStream) -> io::Result<()> {
+#[derive(Clone)]
+struct PgPooler {
+    pools: Arc<Mutex<BTreeMap<String, bb8::Pool<PgConnManager>>>>,
+}
+
+impl PgPooler {
+    fn new() -> PgPooler {
+        PgPooler {
+            pools: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    async fn get_pool(
+        &mut self,
+        startup_message: StartupMessage,
+    ) -> io::Result<bb8::Pool<PgConnManager>> {
+        // TODO: We assume the DB is always set.
+        let database = startup_message.database.clone().unwrap();
+
+        // Get lock around "pools", get or insert new pool, and clone.
+        let mut pools = self.pools.lock().await;
+        let pool = match pools.entry(database) {
+            Entry::Occupied(pool) => pool.into_mut(),
+            Entry::Vacant(pools) => {
+                // TODO: Better to unlock here while connecting? Probably? Nested locking per
+                // database?
+                let manager = PgConnManager::new(startup_message);
+                let pool = bb8::Pool::builder().max_size(50).build(manager).await?;
+                pools.insert(pool)
+            }
+        }
+        .clone();
+
+        Ok(pool)
+    }
+}
+
+async fn handle_server_startup(
+    conn: &mut TcpStream,
+    startup_message: &StartupMessage,
+) -> io::Result<()> {
     let mut msg = [0; 1024];
-    BigEndian::write_i32(&mut msg[0..4], 23);
     BigEndian::write_i32(&mut msg[4..8], 196608);
-    write!(&mut msg[8..], "user");
+    write!(&mut msg[8..], "user")?;
     msg[12] = 0;
-    write!(&mut msg[13..], "postgres");
-    msg[21] = 0;
-    msg[22] = 0;
-    println!("Srv startup: {:?}", &msg[..23]);
-    conn.write(&mut msg[..23]).await?;
+
+    let mut idx = 13;
+    let user = startup_message.user.clone().unwrap();
+    write!(&mut msg[idx..], "{}", &user)?;
+    idx += user.len();
+    msg[idx] = 0;
+    idx += 1;
+    write!(&mut msg[idx..], "database")?;
+    idx += 8;
+    msg[idx] = 0;
+    idx += 1;
+    let database = startup_message.database.clone().unwrap();
+    write!(&mut msg[idx..], "{}", &database)?;
+    idx += database.len();
+    msg[idx] = 0;
+    idx += 1;
+    msg[idx] = 0;
+    idx += 1;
+
+    // Write size
+    BigEndian::write_i32(&mut msg[0..4], idx as i32);
+    println!("Srv startup for db: {:?}: {:?}", &database, &msg[..idx]);
+    conn.write(&mut msg[..idx]).await?;
 
     // Expect Authentication OK
     let n = conn.read(&mut msg).await?;
@@ -80,7 +149,7 @@ async fn handle_server_startup(conn: &mut TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct StartupMessage {
     user: Option<String>,
     database: Option<String>,
@@ -148,19 +217,14 @@ async fn main() -> io::Result<()> {
     println!("Listening on: {:?}", bind_addr);
     let mut listener = TcpListener::bind(bind_addr).await?;
 
-    let manager = PgConnManager {};
-    let pg_conn_pool = bb8::Pool::builder()
-        .max_size(50)
-        .build(manager)
-        .await
-        .unwrap();
+    let pg_pooler = PgPooler::new();
 
     loop {
         let (mut client, _) = listener.accept().await?;
         let client_info = format!("{:?}", client);
         println!("Client connected: {:?}", client_info);
         tokio::spawn({
-            let pg_conn_pool = pg_conn_pool.clone();
+            let mut pg_pooler = pg_pooler.clone();
 
             async move {
                 // Allocate buffer for the client and server
@@ -233,7 +297,8 @@ async fn main() -> io::Result<()> {
                     };
 
                     // Check out a pg_conn
-                    let mut pg_conn = pg_conn_pool.get().await.unwrap();
+                    let pool = pg_pooler.get_pool(startup_message.clone()).await.unwrap();
+                    let mut pg_conn = pool.get().await.unwrap();
 
                     // Write Query to PG
                     pg_conn.write(&buffer[..n]).await.unwrap();
