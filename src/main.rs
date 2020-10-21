@@ -15,6 +15,108 @@ use tokio::net::{
 };
 use tokio::sync::Mutex;
 
+#[derive(Debug)]
+enum PgMsg<'a> {
+    Msg(char),
+    Query(&'a str),
+}
+
+struct PgParser {}
+
+impl PgParser {
+    fn new() -> PgParser {
+        PgParser {}
+    }
+
+    fn read<'a>(
+        &self,
+        buffer: &'a [u8],
+    ) -> Result<(Option<PgMsg<'a>>, usize), Box<dyn std::error::Error + std::marker::Send>> {
+        // If we don't have enough data to capture the type and size of
+        // msg then bail.
+        if buffer.len() < 5 {
+            return Ok((None, 0));
+        }
+
+        // Capture command type and reset state.
+        let tag = buffer[0] as char;
+        let msg_size = BigEndian::read_i32(&buffer[1..5]) as usize;
+
+        // No partial message support for now.
+        if buffer.len() < msg_size {
+            // HACK: I don't want to worry about copying the query buffer,
+            // so I'm going to require the full query message.
+            println!("PgParser: buffer len < msg_size");
+            return Ok((None, 0));
+        }
+
+        // We know the command is always present at this point.
+        match tag {
+            'Q' => {
+                let query = std::str::from_utf8(&buffer[5..msg_size]).unwrap();
+                Ok((Some(PgMsg::Query(query)), msg_size + 1))
+            }
+            'X' => {
+                // These tags we just want to skip over and ack that they were parsed.
+                Ok((Some(PgMsg::Msg(tag)), msg_size + 1))
+            }
+            _ => {
+                panic!("Uknown tag received: {}", tag);
+            }
+        }
+    }
+}
+
+struct PgConn {
+    conn: TcpStream,
+    parser: PgParser,
+    buffer: BytesMut,
+    buffer_index: usize,
+    buffer_size: usize,
+}
+
+impl PgConn {
+    fn new(conn: TcpStream) -> PgConn {
+        let mut buffer = BytesMut::with_capacity(8096);
+        buffer.resize(8096, 0);
+        let parser = PgParser::new();
+        PgConn {
+            conn,
+            buffer,
+            parser,
+            buffer_index: 0,
+            buffer_size: 0,
+        }
+    }
+
+    async fn next<'a>(
+        &'a mut self,
+    ) -> Result<(&'a [u8], PgMsg<'a>), Box<dyn std::error::Error + std::marker::Send>> {
+        // If there is no (or no more) buffer, read and set state.
+        if self.buffer_index == 0 || self.buffer_index == self.buffer_size {
+            println!("PgConn is going to read!");
+            self.buffer_index = 0;
+            self.buffer_size = self.conn.read(&mut self.buffer).await.unwrap();
+            println!("PgConn read {} bytes!", self.buffer_size);
+        }
+
+        let bytes = &self.buffer[self.buffer_index..self.buffer_size];
+
+        println!("PgConn bytes from read: {:?}", bytes);
+        match self.parser.read(bytes)? {
+            (Some(msg), bytes_read) => {
+                self.buffer_index = bytes_read;
+                Ok((bytes, msg))
+            }
+            x => panic!("Something new in the pg_conn next: {:?}", x),
+        }
+    }
+
+    async fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.conn.write(&buffer).await
+    }
+}
+
 struct PgConnManager {
     startup_message: StartupMessage,
 }
@@ -274,26 +376,22 @@ async fn main() -> io::Result<()> {
                 let n = client.write(&msg[..]).await.unwrap();
                 println!("Wrote: {:?}", n);
 
+                let mut conn = PgConn::new(client);
                 loop {
                     println!("Waiting for a query from the client");
 
                     // Wait for Query
-                    let n = client.read(&mut buffer).await.unwrap();
-                    let tag = buffer[0] as char;
-                    match tag {
-                        'Q' => {
-                            //let tag = BigEndian::read_i32(&buffer[0..4]);
-                            println!("Read: {:?}, Tag: {}", n, tag as char);
-                            let size = BigEndian::read_i32(&buffer[1..5]) as usize;
-                            let query = std::str::from_utf8(&buffer[5..size]).unwrap();
+                    let buffer = match conn.next().await.unwrap() {
+                        (buffer, PgMsg::Query(query)) => {
                             println!("Query: {}", query);
+                            buffer
                         }
-                        'X' => {
+                        (_, PgMsg::Msg('X')) => {
                             // Client closed the connection.
                             println!("Terminate received!");
                             break;
                         }
-                        _ => panic!("Found new tag: {}", tag),
+                        _ => unimplemented!(),
                     };
 
                     // Check out a pg_conn
@@ -301,107 +399,79 @@ async fn main() -> io::Result<()> {
                     let mut pg_conn = pool.get().await.unwrap();
 
                     // Write Query to PG
-                    pg_conn.write(&buffer[..n]).await.unwrap();
+                    pg_conn.write(&buffer).await.unwrap();
 
                     'transaction: loop {
                         println!("In the query loop!");
 
                         // Proxy query until transaction completes.
-                        match futures::future::select(
-                            client.read(&mut buffer),
+                        let n = match futures::future::select(
+                            Box::pin(conn.next()),
+                            //client.read(&mut buffer),
                             pg_conn.read(&mut pg_buffer),
                         )
                         .await
                         {
-                            Either::Left((Ok(n), _)) => {
-                                // Handle client
+                            // Handle client
+                            Either::Left((Ok((buffer, PgMsg::Query(query))), _)) => {
                                 // Query
-                                pg_conn.write(&buffer[..n]).await.unwrap();
-                                println!("Delivered to server!");
-                                let tag = buffer[0] as char;
-                                match tag {
-                                    'Q' => {
-                                        //let tag = BigEndian::read_i32(&buffer[0..4]);
-                                        println!("Read: {:?}, Tag: {}", n, tag as char);
-                                        let size = BigEndian::read_i32(&buffer[1..5]) as usize;
-                                        let query = std::str::from_utf8(&buffer[5..size]).unwrap();
-                                        println!("Query: {}", query);
-
-                                        //                                    // Empty Query Response
-                                        //                                    let mut msg = [0; 5];
-                                        //                                    msg[0] = b'I';
-                                        //                                    BigEndian::write_i32(&mut msg[1..5], 4);
-                                        //                                    let n = client.write(&msg[..]).await.unwrap();
-                                        //                                    println!("Wrote: {:?}", n);
-                                        //
-                                        //                                    // Ready For Query
-                                        //                                    let mut msg = [0; 6];
-                                        //                                    msg[0] = b'Z';
-                                        //                                    BigEndian::write_i32(&mut msg[1..5], 5);
-                                        //                                    msg[5] = b'I';
-                                        //                                    let n = client.write(&msg[..]).await.unwrap();
-                                        //                                    println!("Wrote: {:?}", n);
-                                    }
-                                    'X' => {
-                                        // Client closed the connection.
-                                        println!("Terminate received!");
-                                        break;
-                                    }
-                                    _ => {
-                                        println!("Found new tag: {}", tag);
-                                        //break;
-                                    }
-                                };
+                                println!("Query: {}", query);
+                                pg_conn.write(&buffer).await.unwrap();
+                                continue;
                             }
-                            Either::Right((Ok(n), _)) => {
-                                // Handle server
-                                println!("Writing to client: {}", pg_buffer[0] as char);
-                                let n = n as usize;
-                                println!("SRV read {} bytes", n);
-                                client.write(&pg_buffer[..n]).await.unwrap();
+                            Either::Left((Ok((buffer, PgMsg::Msg('X'))), _)) => {
+                                // Client closed the connection.
+                                println!("Terminate received!");
+                                pg_conn.write(&buffer).await.unwrap();
+                                break;
+                            }
+                            Either::Right((Ok(n), _)) => n,
+                            x => panic!("Missed a select case!"),
+                        };
 
-                                let mut idx = 0;
-                                while idx < n {
-                                    let tag = pg_buffer[idx] as char;
-                                    println!("Server parsing: {}, idx: {}", tag, idx);
-                                    match tag {
-                                        'C' | 'D' | 'T' => {
-                                            let size = BigEndian::read_i32(
-                                                &pg_buffer[(idx + 1)..(idx + 5)],
-                                            )
-                                                as usize;
-                                            println!(
-                                                "SRV: Tag: {}, Msg Size: {}, Msg: {:?}",
-                                                tag,
-                                                size,
-                                                &pg_buffer[idx..(idx + size)]
-                                            );
-                                            idx += size + 1;
-                                        }
-                                        'Z' => {
-                                            if pg_buffer[idx + 5] == b'I' {
-                                                // Transaction completed. Return pg conn to pool.
-                                                drop(pg_conn);
-                                                println!("SRV: Connection was closed!");
-                                                break 'transaction;
-                                            }
-                                            println!(
-                                                "Server said READY FOR QUERY: {}",
-                                                pg_buffer[idx + 5] as char
-                                            );
-                                            idx += 6;
-                                        }
-                                        _ => {
-                                            println!(
-                                                "New tag for server to parse: {} - b{}",
-                                                tag, tag as u8
-                                            );
-                                            break;
-                                        }
+                        // Server has data to send to client
+                        println!("Writing to client: {}", pg_buffer[0] as char);
+                        let n = n as usize;
+                        println!("SRV read {} bytes", n);
+                        conn.write(&pg_buffer[..n]).await.unwrap();
+
+                        let mut idx = 0;
+                        while idx < n {
+                            let tag = pg_buffer[idx] as char;
+                            println!("Server parsing: {}, idx: {}", tag, idx);
+                            match tag {
+                                'C' | 'D' | 'T' => {
+                                    let size = BigEndian::read_i32(&pg_buffer[(idx + 1)..(idx + 5)])
+                                        as usize;
+                                    println!(
+                                        "SRV: Tag: {}, Msg Size: {}, Msg: {:?}",
+                                        tag,
+                                        size,
+                                        &pg_buffer[idx..(idx + size)]
+                                    );
+                                    idx += size + 1;
+                                }
+                                'Z' => {
+                                    if pg_buffer[idx + 5] == b'I' {
+                                        // Transaction completed. Return pg conn to pool.
+                                        drop(pg_conn);
+                                        println!("SRV: Connection was closed!");
+                                        break 'transaction;
                                     }
+                                    println!(
+                                        "Server said READY FOR QUERY: {}",
+                                        pg_buffer[idx + 5] as char
+                                    );
+                                    idx += 6;
+                                }
+                                _ => {
+                                    println!(
+                                        "New tag for server to parse: {} - b{}",
+                                        tag, tag as u8
+                                    );
+                                    break;
                                 }
                             }
-                            x => panic!("Missed a select case: {:?}", x),
                         }
                     }
                 }
