@@ -191,40 +191,15 @@ async fn handle_server_startup(
     conn: &mut TcpStream,
     startup_message: &StartupMessage,
 ) -> io::Result<()> {
-    let mut msg = [0; 1024];
-    BigEndian::write_i32(&mut msg[4..8], 196608);
-    write!(&mut msg[8..], "user")?;
-    msg[12] = 0;
-
-    let mut idx = 13;
-    let user = startup_message.user.clone().unwrap();
-    write!(&mut msg[idx..], "{}", &user)?;
-    idx += user.len();
-    msg[idx] = 0;
-    idx += 1;
-    write!(&mut msg[idx..], "database")?;
-    idx += 8;
-    msg[idx] = 0;
-    idx += 1;
-    let database = startup_message.database.clone().unwrap();
-    write!(&mut msg[idx..], "{}", &database)?;
-    idx += database.len();
-    msg[idx] = 0;
-    idx += 1;
-    msg[idx] = 0;
-    idx += 1;
-
-    // Write size
-    BigEndian::write_i32(&mut msg[0..4], idx as i32);
-    println!("Srv startup for db: {:?}: {:?}", &database, &msg[..idx]);
-    conn.write(&mut msg[..idx]).await?;
+    startup_message.write(conn).await?;
 
     // Expect Authentication OK
-    let n = conn.read(&mut msg).await?;
+    let mut buffer = [0; 1024];
+    let n = conn.read(&mut buffer).await?;
     println!("Srv read: {}", n);
-    let tag = msg[0] as char;
-    match msg[0] as char {
-        'R' => match BigEndian::read_i32(&msg[5..9]) {
+    let tag = buffer[0] as char;
+    match buffer[0] as char {
+        'R' => match BigEndian::read_i32(&buffer[5..9]) {
             0 => {}
             bad_auth => panic!("Expected Auth OK, found: {}", bad_auth),
         },
@@ -235,13 +210,13 @@ async fn handle_server_startup(
     };
 
     // Expect params, backend params, and finally a query OK
-    let mut msg = &msg[9..];
+    let mut buffer = &buffer[9..];
     loop {
-        let tag = msg[0] as char;
+        let tag = buffer[0] as char;
         match tag {
             'K' | 'S' => {
-                let msg_size = BigEndian::read_i32(&msg[1..5]) as usize + 1;
-                msg = &msg[msg_size..];
+                let size = BigEndian::read_i32(&buffer[1..5]) as usize + 1;
+                buffer = &buffer[size..];
             }
             'Z' => break,
             _ => panic!("Invalid tag after server startup: {}", tag),
@@ -257,6 +232,38 @@ struct StartupMessage {
     database: Option<String>,
     application_name: Option<String>,
     client_encoding: Option<String>,
+}
+
+impl StartupMessage {
+    async fn write(&self, conn: &mut TcpStream) -> io::Result<usize> {
+        let mut msg = [0; 1024];
+        BigEndian::write_i32(&mut msg[4..8], 196608);
+        write!(&mut msg[8..], "user")?;
+        msg[12] = 0;
+
+        let mut idx = 13;
+        let user = self.user.clone().unwrap();
+        write!(&mut msg[idx..], "{}", &user)?;
+        idx += user.len();
+        msg[idx] = 0;
+        idx += 1;
+        write!(&mut msg[idx..], "database")?;
+        idx += 8;
+        msg[idx] = 0;
+        idx += 1;
+        let database = self.database.clone().unwrap();
+        write!(&mut msg[idx..], "{}", &database)?;
+        idx += database.len();
+        msg[idx] = 0;
+        idx += 1;
+        msg[idx] = 0;
+        idx += 1;
+
+        // Write size
+        BigEndian::write_i32(&mut msg[0..4], idx as i32);
+        println!("Srv startup for db: {:?}: {:?}", &database, &msg[..idx]);
+        conn.write(&mut msg[..idx]).await
+    }
 }
 
 fn read_cstr(start: usize, buffer: &mut BytesMut) -> Option<(usize, &[u8])> {
