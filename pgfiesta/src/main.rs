@@ -216,6 +216,7 @@ async fn handle_server_startup(
         match tag {
             'K' | 'S' => {
                 let size = BigEndian::read_i32(&buffer[1..5]) as usize + 1;
+                println!("buffer: {} / {:?}", tag, std::str::from_utf8(&buffer[..size]));
                 buffer = &buffer[size..];
             }
             'Z' => break,
@@ -256,6 +257,14 @@ impl StartupMessage {
         idx += database.len();
         msg[idx] = 0;
         idx += 1;
+        write!(&mut msg[idx..], "application_name")?;
+        idx += 16;
+        msg[idx] = 0;
+        idx += 1;
+        write!(&mut msg[idx..], "pgfiesta")?;
+        idx += 8;
+        msg[idx] = 0;
+        idx += 1;
         msg[idx] = 0;
         idx += 1;
 
@@ -276,6 +285,30 @@ fn read_cstr(start: usize, buffer: &mut BytesMut) -> Option<(usize, &[u8])> {
         }
         None => None,
     }
+}
+
+async fn write_parameter_status(client: &mut TcpStream, key: &str, value: &str) -> io::Result<usize> {
+    // Parameter Status
+    let mut msg = [0; 1024];
+    msg[0] = b'S';
+
+    let mut idx = 5;
+    write!(&mut msg[idx..], "{}", key)?;
+    idx += key.len();
+    msg[idx] = 0;
+    idx += 1;
+    write!(&mut msg[idx..], "{}", value)?;
+    idx += value.len();
+    msg[idx] = 0;
+    idx += 1;
+
+    // Size is 1 less because the tag doesn't count.
+    let size = idx - 1;
+    BigEndian::write_i32(&mut msg[1..5], size as i32);
+
+    println!("OUT!!! {:?}", &msg[..idx]);
+
+    client.write(&msg[..idx]).await
 }
 
 fn print_startup_message(
@@ -375,6 +408,9 @@ async fn main() -> io::Result<()> {
                 let n = client.write(&msg[..]).await.unwrap();
                 println!("Wrote: {:?}", n);
 
+                let n = write_parameter_status(&mut client, "server_version", "12.4").await.unwrap();
+                println!("Wrote: {:?}", n);
+
                 // Ready For Query
                 let mut msg = [0; 6];
                 msg[0] = b'Z';
@@ -447,7 +483,7 @@ async fn main() -> io::Result<()> {
                             let tag = pg_buffer[idx] as char;
                             println!("Server parsing: {}, idx: {}", tag, idx);
                             match tag {
-                                'C' | 'D' | 'T' => {
+                                'C' | 'D' | 'E' | 'T' => {
                                     let size = BigEndian::read_i32(&pg_buffer[(idx + 1)..(idx + 5)])
                                         as usize;
                                     println!(
@@ -468,14 +504,14 @@ async fn main() -> io::Result<()> {
                                     println!(
                                         "Server said READY FOR QUERY: {}",
                                         pg_buffer[idx + 5] as char
-                                    );
+                                        );
                                     idx += 6;
                                 }
                                 _ => {
                                     println!(
                                         "New tag for server to parse: {} - b{}",
                                         tag, tag as u8
-                                    );
+                                        );
                                     break;
                                 }
                             }
