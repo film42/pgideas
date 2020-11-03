@@ -1,0 +1,96 @@
+pgpoppy:
+  pgbouncer_connection_options: "host=/var/run/postgresql/pgbouncer port=6432 user=pgbouncer database=pgbouncer"
+
+pgbouncer:
+  options:
+    admin_users: pgbouncer
+    auth_file: pgbouncer
+    auth_hba_file: pgbouncer
+    auth_type: hba
+    client_idle_timeout: 0
+    client_tls_ca_file: "/etc/puppetlabs/puppet/ssl/certs/ca.pem"
+    client_tls_cert_file: "/etc/puppetlabs/puppet/ssl/certs/%{trusted.certname}.pem"
+    client_tls_ciphers: ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-
+    client_tls_key_file: "/etc/pgbouncer/%{trusted.certname}.pem"
+    client_tls_protocols: tlsv1.2
+    client_tls_sslmode: require
+    default_pool_size: 10
+    ignore_startup_parameters: extra_float_digits application_name search_path
+    listen_addr: "%{::ipaddress}"
+    listen_port: 6432
+    max_client_conn: 5000
+    min_pool_size: 1
+    pool_mode: transaction
+    reserve_pool_size: 25
+    reserve_pool_timeout: 0.05
+    restart_on_change: false
+    server_check_query: ''
+    server_connect_timeout: 2
+    server_idle_timeout: 150
+    server_lifetime: 3600
+    server_login_retry: 1
+    server_tls_ca_file: "/etc/ssl/certs/ca-certificates.crt"
+    server_tls_ciphers: ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-
+    server_tls_protocols: tlsv1.2
+    server_tls_sslmode: verify-ca
+
+  databases:
+  - database: abba1001_qa
+    options:
+      pool_size: 100
+      client_encoding: UTF-8
+    servers:
+    - name: sa-pg101
+      host: 1.1.33.130
+    - name: sa-pg201
+      host: 1.1.33.131
+    - name: sb-pg101
+      host: 1.1.34.130
+    - name: sb-pg201
+      host: 1.1.34.131
+    - name: sd-pg101
+      host: 1.1.35.130
+    - name: sd-pg201
+      host: 1.1.35.131
+    healthcheck:
+      port: 8000
+      uri: "/primary"
+
+  - database: abba1001_sa_qa_ro
+    options:
+      pool_size: 100
+      client_encoding: UTF-8
+    servers:
+    - name: sa-pg101
+      host: 1.1.33.130
+    - name: sa-pg201
+      host: 1.1.33.131
+    healthcheck:
+      port: 8000
+      uri: "/replica?max_allowable_bytelag=500MB"
+
+  - database: abba1001_sb_qa_ro
+    options:
+      pool_size: 100
+      client_encoding: UTF-8
+    servers:
+    - name: sb-pg101
+      host: 1.1.34.130
+    - name: sb-pg201
+      host: 1.1.34.131
+    healthcheck:
+      port: 8000
+      uri: "/replica?max_allowable_bytelag=500MB"
+
+  - database: abba1001_sd_qa_ro
+    options:
+      pool_size: 100
+      client_encoding: UTF-8
+    servers:
+    - name: sb-pg101
+      host: 1.1.35.130
+    - name: sb-pg201
+      host: 1.1.35.131
+    healthcheck:
+      port: 8000
+      uri: "/replica?max_allowable_bytelag=500MB"
