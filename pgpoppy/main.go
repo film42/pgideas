@@ -70,12 +70,12 @@ func (c *Config) ToPgbouncerConfigFile() (*PgbouncerConfigFile, error) {
 		// If options are not valid, we need to check a fallback database.
 		for !isValid {
 			if len(fallbackDatabaseName) == 0 {
-				panic(fmt.Sprintf("Database %s has no healthy servers and did not specify a fallback database.", dbnameTrace))
+				return nil, fmt.Errorf("Database %s has no healthy servers and did not specify a fallback database.", dbnameTrace)
 			}
 
 			database = c.getDatabase(fallbackDatabaseName)
 			if database == nil {
-				panic(fmt.Sprintf("Database %s has no healthy servers and listed a fallback database that does not exist.", dbnameTrace))
+				return nil, fmt.Errorf("Database %s has no healthy servers and listed a fallback database that does not exist.", dbnameTrace)
 			}
 
 			// Try again.
