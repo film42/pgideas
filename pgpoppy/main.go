@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/kr/pretty"
 	"github.com/spf13/cobra"
@@ -92,6 +94,16 @@ func (c *Config) ToPgbouncerConfigFile() (*PgbouncerConfigFile, error) {
 		Pgbouncer: pgbouncerOpts,
 		Databases: databases,
 	}, nil
+}
+
+func (c *Config) PerformHealthChecks() error {
+	for _, database := range c.PgbouncerConfig.Databases {
+		err := database.PerformHealthChecks()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type PoppyConfig struct {
@@ -195,6 +207,26 @@ func (dc *DatabaseConfig) GetOptions() (string, bool) {
 	return strings.Join(options, " "), true
 }
 
+func (dc *DatabaseConfig) PerformHealthChecks() error {
+	// No health check? Mark all servers as healthy.
+	if dc.Healthcheck == nil {
+		for _, server := range dc.Servers {
+			server.isHealthy = true
+		}
+		return nil
+	}
+
+	// Otherwise perform the health check for each server.
+	for _, server := range dc.Servers {
+		isHealthy, err := dc.Healthcheck.PerformForHost(server.ServerHost)
+		if err != nil {
+			return err
+		}
+		server.isHealthy = isHealthy
+	}
+	return nil
+}
+
 type DatabaseOptionsConfig struct {
 	PoolSize       int64  `yaml:"pool_size"`
 	PoolMode       string `yaml:"pool_mode"`
@@ -214,6 +246,22 @@ type ServerConfig struct {
 type HealthcheckConfig struct {
 	Port int64  `yaml:"port"`
 	URI  string `yaml:"uri"`
+}
+
+func (hc *HealthcheckConfig) PerformForHost(host string) (bool, error) {
+	client := http.Client{
+		Timeout: time.Second,
+	}
+	url := fmt.Sprintf("http://%s%s", host, hc.URI)
+	response, err := client.Get(url)
+	if err != nil {
+		fmt.Println("Error while checking", host, ":", err, "; marking as unhealthy")
+		return false, nil
+	}
+	if response.StatusCode != 200 {
+		return false, nil
+	}
+	return true, nil
 }
 
 func ParseConfig(file string) (*Config, error) {
@@ -242,6 +290,11 @@ func main() {
 		Short: "Bootstrap a pgbouncer config via poppy yaml config",
 		Run: func(cmd *cobra.Command, args []string) {
 			pretty.Println(cfg)
+
+			err := cfg.PerformHealthChecks()
+			if err != nil {
+				panic(err)
+			}
 
 			pgbouncerCfgFile, err := cfg.ToPgbouncerConfigFile()
 			if err != nil {
