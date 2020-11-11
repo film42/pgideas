@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -109,6 +110,7 @@ func (c *Config) PerformHealthChecks() error {
 type PoppyConfig struct {
 	PgbouncerConnectionOptions string `yaml:"pgbouncer_connection_options"`
 	PgbouncerConfigPath        string `yaml:"pgbouncer_config_path"`
+	PgbouncerReloadCommand     string `yaml:"pgbouncer_reload_command"`
 }
 
 type PgbouncerConfig struct {
@@ -291,11 +293,13 @@ func main() {
 		Run: func(cmd *cobra.Command, args []string) {
 			pretty.Println(cfg)
 
+			// Check servers to see who is healthy.
 			err := cfg.PerformHealthChecks()
 			if err != nil {
 				panic(err)
 			}
 
+			// Generate config.
 			pgbouncerCfgFile, err := cfg.ToPgbouncerConfigFile()
 			if err != nil {
 				panic(err)
@@ -307,6 +311,17 @@ func main() {
 			fmt.Println(string(cfgFile))
 
 			err = ioutil.WriteFile(cfg.PoppyConfig.PgbouncerConfigPath, cfgFile, 0644)
+			if err != nil {
+				panic(err)
+			}
+
+			// Reload pgbouncer.
+			if len(cfg.PoppyConfig.PgbouncerReloadCommand) == 0 {
+				return
+			}
+			reloadCmd := strings.Split(cfg.PoppyConfig.PgbouncerReloadCommand, " ")
+			fmt.Println("Running pgbouncer reload command:", reloadCmd)
+			err = exec.Command(reloadCmd[0], reloadCmd[1:]...).Run()
 			if err != nil {
 				panic(err)
 			}
