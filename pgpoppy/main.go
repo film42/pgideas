@@ -47,14 +47,44 @@ type Config struct {
 	PgbouncerConfig *PgbouncerConfig `yaml:"pgbouncer"`
 }
 
+func (c *Config) getDatabase(dbname string) *DatabaseConfig {
+	for _, database := range c.PgbouncerConfig.Databases {
+		if database.DatabaseName == dbname {
+			return database
+		}
+	}
+	return nil
+}
+
 func (c *Config) ToPgbouncerConfigFile() (*PgbouncerConfigFile, error) {
 	pgbouncerOpts := c.PgbouncerConfig.Options
 
 	databases := map[string]string{}
 	for _, database := range c.PgbouncerConfig.Databases {
-		name := database.DatabaseName
-		options := database.GetOptions()
-		databases[name] = options
+		dbname := database.DatabaseName
+		dbnameTrace := dbname
+
+		fallbackDatabaseName := database.FallbackDatabase
+		options, isValid := database.GetOptions()
+
+		// If options are not valid, we need to check a fallback database.
+		for !isValid {
+			if len(fallbackDatabaseName) == 0 {
+				panic(fmt.Sprintf("Database %s has no healthy servers and did not specify a fallback database.", dbnameTrace))
+			}
+
+			database = c.getDatabase(fallbackDatabaseName)
+			if database == nil {
+				panic(fmt.Sprintf("Database %s has no healthy servers and listed a fallback database that does not exist.", dbnameTrace))
+			}
+
+			// Try again.
+			dbnameTrace = dbnameTrace + " --(falling back to)--> " + fallbackDatabaseName
+			fallbackDatabaseName = database.FallbackDatabase
+			options, isValid = database.GetOptions()
+		}
+
+		databases[dbname] = options
 	}
 
 	return &PgbouncerConfigFile{
@@ -109,13 +139,33 @@ type PgbouncerOptionsConfig struct {
 }
 
 type DatabaseConfig struct {
-	DatabaseName    string                 `yaml:"database"`
-	DatabaseOptions *DatabaseOptionsConfig `yaml:"options"`
-	Servers         []*ServerConfig        `yaml:"servers"`
-	Healthcheck     *HealthcheckConfig     `yaml:"healthcheck"`
+	DatabaseName     string                 `yaml:"database"`
+	DatabaseOptions  *DatabaseOptionsConfig `yaml:"options"`
+	Servers          []*ServerConfig        `yaml:"servers"`
+	Healthcheck      *HealthcheckConfig     `yaml:"healthcheck"`
+	FallbackDatabase string                 `yaml:"fallback_database"`
 }
 
-func (dc *DatabaseConfig) GetOptions() string {
+func (dc *DatabaseConfig) pickServer() *ServerConfig {
+	// Look for a healthy server
+	for _, server := range dc.Servers {
+		if server.isHealthy {
+			return server
+		}
+	}
+
+	// Or, look for a default server.
+	for _, server := range dc.Servers {
+		if server.Default {
+			return server
+		}
+	}
+
+	// Otherwise, no server is available.
+	return nil
+}
+
+func (dc *DatabaseConfig) GetOptions() (string, bool) {
 	options := []string{}
 	if dc.DatabaseOptions.PoolSize != 0 {
 		options = append(options, fmt.Sprintf("pool_size=%d", dc.DatabaseOptions.PoolSize))
@@ -133,10 +183,14 @@ func (dc *DatabaseConfig) GetOptions() string {
 		options = append(options, fmt.Sprintf("dbname=%s", dc.DatabaseOptions.Dbname))
 	}
 
-	// Getting the host should be checked but for now it will be the first. It is expected to be there.
-	options = append(options, fmt.Sprintf("host=%s", dc.Servers[0].ServerHost))
+	server := dc.pickServer()
+	if server == nil {
+		// No server found, try looking for a fallback database?
+		return "", false
+	}
+	options = append(options, fmt.Sprintf("host=%s", server.ServerHost))
 
-	return strings.Join(options, " ")
+	return strings.Join(options, " "), true
 }
 
 type DatabaseOptionsConfig struct {
@@ -150,6 +204,9 @@ type DatabaseOptionsConfig struct {
 type ServerConfig struct {
 	ServerName string `yaml:"name"`
 	ServerHost string `yaml:"host"`
+	Default    bool   `yaml:"default"`
+
+	isHealthy bool
 }
 
 type HealthcheckConfig struct {

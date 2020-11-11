@@ -46,6 +46,7 @@ pgbouncer:
       host: 1.1.33.131
     - name: sb-pg101
       host: 1.1.34.130
+      default: true
     - name: sb-pg201
       host: 1.1.34.131
     - name: sd-pg101
@@ -60,11 +61,14 @@ pgbouncer:
     options:
       pool_size: 100
       client_encoding: UTF-8
+    fallback_database: abba1001_qa
     servers:
     - name: sa-pg101
       host: 1.1.33.130
     - name: sa-pg201
       host: 1.1.33.131
+    - name: sa-pg301
+      host: 1.1.33.132
     healthcheck:
       port: 8000
       uri: "/replica?max_allowable_bytelag=500MB"
@@ -73,6 +77,7 @@ pgbouncer:
     options:
       pool_size: 100
       client_encoding: UTF-8
+    fallback_database: abba1001_qa
     servers:
     - name: sb-pg101
       host: 1.1.34.130
@@ -86,6 +91,7 @@ pgbouncer:
     options:
       pool_size: 100
       client_encoding: UTF-8
+    fallback_database: abba1001_qa
     servers:
     - name: sb-pg101
       host: 1.1.35.130
