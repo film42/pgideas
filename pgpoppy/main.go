@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kr/pretty"
+	"github.com/spf13/cobra"
 	"gopkg.in/ini.v1"
 	"gopkg.in/yaml.v2"
 )
@@ -95,6 +96,7 @@ func (c *Config) ToPgbouncerConfigFile() (*PgbouncerConfigFile, error) {
 
 type PoppyConfig struct {
 	PgbouncerConnectionOptions string `yaml:"pgbouncer_connection_options"`
+	PgbouncerConfigPath        string `yaml:"pgbouncer_config_path"`
 }
 
 type PgbouncerConfig struct {
@@ -234,15 +236,34 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	pretty.Println(cfg)
 
-	pgbouncerCfgFile, err := cfg.ToPgbouncerConfigFile()
-	if err != nil {
-		panic(err)
+	bootstrapCmd := &cobra.Command{
+		Use:   "bootstrap",
+		Short: "Bootstrap a pgbouncer config via poppy yaml config",
+		Run: func(cmd *cobra.Command, args []string) {
+			pretty.Println(cfg)
+
+			pgbouncerCfgFile, err := cfg.ToPgbouncerConfigFile()
+			if err != nil {
+				panic(err)
+			}
+			cfgFile, err := pgbouncerCfgFile.Marshal()
+			if err != nil {
+				panic(err)
+			}
+			fmt.Println(string(cfgFile))
+
+			err = ioutil.WriteFile(cfg.PoppyConfig.PgbouncerConfigPath, cfgFile, 0644)
+			if err != nil {
+				panic(err)
+			}
+		},
 	}
-	cfgFile, err := pgbouncerCfgFile.Marshal()
-	if err != nil {
-		panic(err)
+
+	rootCmd := &cobra.Command{
+		Use:   "poppy",
+		Short: "Poppy is a pgbouncer operator",
 	}
-	fmt.Println(string(cfgFile))
+	rootCmd.AddCommand(bootstrapCmd)
+	rootCmd.Execute()
 }

@@ -1,5 +1,6 @@
 pgpoppy:
   pgbouncer_connection_options: "host=/var/run/postgresql/pgbouncer port=6432 user=pgbouncer database=pgbouncer"
+  pgbouncer_config_path: "tmp/pgbouncer.ini"
 
 pgbouncer:
   options:
